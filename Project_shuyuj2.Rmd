@@ -1,0 +1,1073 @@
+---
+title: "STAT 542: Final Project"
+author: "Shuyu Jia (shuyuj2), Yevgeniy Onegov (ykalini2), Zhehui Chen (zhehuic2)"
+date: "Due May 15, 2020"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+  knitr::opts_chunk$set(include = TRUE)  
+  knitr::opts_chunk$set(echo = FALSE)
+  knitr::opts_chunk$set(message = FALSE)
+  knitr::opts_chunk$set(warning = FALSE)
+  knitr::opts_chunk$set(fig.height = 6, fig.width = 8, out.width = '60%', fig.align = "center")
+  options(width = 90)
+```
+
+```{r}
+pagebreak <- function() {
+  if(knitr::is_latex_output())
+    return("\\newpage")
+  else
+    return('<div style="page-break-before: always;" />')
+}
+```
+
+`r pagebreak()`
+
+# Introduction
+
+The goal of our project is to find the most vulnerable population to COVID-19 virus and to infer on the possible ways to reduce mortality rate. We use strategies discussed in class to model the time-dependent outcomes and predict them at a future time point. 
+
+Project is split into two parts: supervised and unsupervised learning. Unsupervised Learning (UL) methods are leveraged in exploratory analysis to automatically identify structure in the data without using explicitly provided labels. UL methods are also used to represent data with less variables i.e. dimension reduction. We address potential missing data problems before performing UL. The three UL methods we apply are K-means clustering, Hierarchical clustering and a combination of t-SNE and spectral clustering methods for solving three specific questions. Supervised Learning (SL) methods are leveraged to approximate the mapping function which predicts future cases and deaths caused by COVID-19. The main considerations are model complexity and the Bias-Variance tradeoff. The Bias-Variance tradeoff is a balance between Bias, which is the constant error term, and Variance, which is the amount by which the error may vary between different training sets. We implement four different classification models, including Random Forest, Decision Tree, K-nearest neighbors and Boosting, where we map input to output labels while properly tuning parameters. We also accurately implement four different regression models where we map input to a continuous output while properly tuning parameters. Our regression models are Linear Regression, Random Forest, Support Vector Machine and Stochastic Gradient Boosting. 
+
+For unsupervised learning section, we show that counties are clustered based on demographic and health features as well as COVID-19 growth pattern. Each cluster has characteristics that are different from other groups. In classification section, we perform a binary classification of the severity of each county with decent accuracy. In regression section, the results show that linear regression model makes the most accurate predictions of the future death counts, even though the root mean squared error (RMSE) gets larger as the days move on. Based on our analysis, we are able to find the most vulnerable counties to the virus as well as give suggestions on reducing the number of death through statistical analysis.
+
+
+# Literature review
+
+The research goal of the paper^[https://www.stat.berkeley.edu/~binyu/ps/papers2020/covid19_paper.pdf] published by Prof. Bin Yu’s group is “to both provide access to a large data repository (that combines data collected by a range of different sources) and to provide a predictor to forecast short-term COVID-19 mortality at the county-level in the United States.” Combined data from January 22,2020, to April 8,2020 is stored on Github^[https://github.com/Yu-Group/covid19-severity-prediction] for easy access. At the county level, the data includes COVID-19 cases/deaths from USA Facts and NYT along with demographic information, health resource availability, COVID-19 health risk factors and social mobility information. The paper focuses on predicting the number of confirmed deaths instead of confirmed cases, since confirmed cases fail to capture spread of the virus due to the limitation of testing. 
+
+This team performs five models. The first one models each county separately capturing the log-linear relationship between time and number of deaths; the second one models the log-linear relationship between the death count of two consecutive days; the third one is the expansion of the second model with more predictors including the number of cases k days ago, the number of deaths of the neighbor county several days ago and the number of cases of the neighbor county several days ago. The fourth model is also similar to the second one, but with more demographic and healthcare-related features such as median age, population density, number of ICU beds, etc. The fifth one models each county separately capturing the linear relationship between time and the death count. This team finally uses a combination (CLEP) of the third model and the fifth model to determine their results. They find out the majority of counties appear to share an exponential growth, but some are growing sub-exponentially, and that is why a proportion of the linear model come into play. 
+
+Lastly, the paper compares their results to the related work and analyzes the reason why it can be challenging to create good intervals that can account for all the changes. On one hand, the nature of virus itself is highly dynamic; on the other hand, human behavior and policy changes can also be major contributors to influence the trend of both the death and case counts. However, we can still hope for the best that our data and our model can capture the short-term tendency of the COVID-19 deaths at the county level to help people make better decisions at this critical time in this pandemic.
+
+
+```{r}
+# load data
+covid = read.csv("county_data.csv")
+# add new column
+temp = covid["tot_deaths"]/(covid["PopulationEstimate2018"]/100000)
+covid["if_severe"] = factor(ifelse(temp <= 1,1,0))
+```
+
+```{r}
+# data cleaning
+# https://github.com/Yu-Group/covid19-severity-prediction/blob/master/data/list_of_columns.md
+cases = colnames(covid)[89:180]
+deaths = colnames(covid)[181:272]
+```
+
+# Unsupervised learning
+
+```{r}
+# missing value check
+count_na = function(x){ 
+  sum(is.na(x))
+}
+
+#select certain variables
+selected_cols = c("countyFIPS","StateName","PopulationEstimate2018","FracMale2017","PopulationEstimate65.2017","PopulationDensityperSqMile2010","CensusPopulation2010","MedianAge2010","X.EligibleforMedicare2018","MedicareEnrollment.AgedTot2017","DiabetesPercentage","HeartDiseaseMortality","StrokeMortality","Smokers_Percentage","RespMortalityRate2014","X.FTEHospitalTotal2017","TotalM.D..s.TotNon.FedandFed2017","X.HospParticipatinginNetwork2017","X.Hospitals","X.ICU_beds","X.50.gatherings","X.500.gatherings","public.schools","restaurant.dine.in","entertainment.gym","SVIPercentile","if_severe")
+d_h_data = covid[selected_cols]
+check_missing = apply(d_h_data, 2, count_na)
+
+# fill missing 
+
+# X.EligibleforMedicare2018
+idx = which(is.na(d_h_data[,"X.EligibleforMedicare2018"]))
+rate = mean(d_h_data[-idx,"CensusPopulation2010"]/d_h_data[-idx,"X.EligibleforMedicare2018"])
+for (i in 1:nrow(d_h_data)) {
+  if(is.na(d_h_data[i,9]))
+    d_h_data[i,9] = d_h_data[i,7]/rate
+}
+
+# MedicareEnrollment.AgedTot2017
+idx = which(is.na(d_h_data[,"MedicareEnrollment.AgedTot2017"]))
+rate = mean(d_h_data[-idx,"CensusPopulation2010"]/d_h_data[-idx,"MedicareEnrollment.AgedTot2017"])
+for (i in 1:nrow(d_h_data)) {
+  if(is.na(d_h_data[i,10]))
+    d_h_data[i,10] = d_h_data[i,9]/rate
+}
+
+# DiabetesPercentage (use the mean of all Ak)
+idx = which(is.na(d_h_data["DiabetesPercentage"])) #1955(AK)
+d_h_data[1955,"DiabetesPercentage"] = mean(d_h_data[which(d_h_data["StateName"] == "AK")[-28],"DiabetesPercentage"])
+
+# HeartDiseaseMortality (use mean of all AK)
+idx = which(is.na(d_h_data[,"HeartDiseaseMortality"]))
+idx_ak = which(d_h_data["StateName"] == "AK")
+d_h_data[idx,"HeartDiseaseMortality"] = mean(d_h_data[idx_ak[-match(idx,idx_ak)],"HeartDiseaseMortality"])
+
+# StrokeMortality
+idx = which(is.na(d_h_data[,"StrokeMortality"]))
+idx_ak = which(d_h_data["StateName"] == "AK")
+idx_sd = which(d_h_data["StateName"] == "SD") 
+d_h_data[1664,"StrokeMortality"] = mean(d_h_data[idx_sd[-48],"StrokeMortality"])
+idx = which(is.na(d_h_data[,"StrokeMortality"]))
+d_h_data[idx,"StrokeMortality"] = mean(d_h_data[idx_ak[-match(idx,idx_ak)],"StrokeMortality"])
+
+
+# X.50.gatherings (only SD and ND) 
+idx = which(is.na(d_h_data[,"X.50.gatherings"]))
+d_h_data[idx,c("X.50.gatherings","X.500.gatherings")] = 0
+
+# entertainment.gym
+idx = which(is.na(d_h_data[,"entertainment.gym"]))
+d_h_data[idx,"entertainment.gym"] = 0
+
+# SVIPercentile
+idx = which(is.na(d_h_data[,"SVIPercentile"]))
+d_h_data[idx,"SVIPercentile"] = 0
+
+check_missing = apply(d_h_data, 2, count_na)
+```
+
+At the county level, our data contains 3141 observations (counties) with 276 features including COVID-19 cases/deaths from USA Facts and NYT, automatically updated every day, along with demographic information, health resource availability, COVID-19 health risk factors, and social mobility information. 
+
+Before clustering analysis, we first deal with missing values. We define a function "count_na" which is used to calculate the number of missing values for each feature. Variables with over 50% missing data are removed. For other features with acceptable missing rate, we fill the missing based on the mean value of its state since the same state is more likely to have same pattern than using the country mean. After filling, there is no missing values in our data set.
+
+```{r}
+check = sum(apply(d_h_data, 2, count_na))
+```
+
+## Q1: Underlying clusters of counties based on the demographics and health-related information (Method: K-means)
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 3, fig.width = 5, out.width = '50%'}
+# KMEANS
+set.seed(123)
+library(factoextra, quietly = TRUE)
+# select number 
+# fviz_nbclust(d_h_data[,-c(1,2,27)], kmeans, method = "wss", verbose = FALSE) # num cluster is 5
+```
+
+To obtain underlying clusters (at county level) in terms of demographics and health-related features, we perform k-means clustering method. K-means method minimizes within-cluster variances (squared Euclidean distances) and it's easy to implement. We first determine the number of clusters (K) by plotting the relationship between total within sum of square and cluster number. We choose 5 as the optimal K since it has smaller "wss" with relatively small value. 
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 3, fig.width = 5, out.width = '50%'}
+set.seed(123)
+kmeans_model = kmeans(d_h_data[,-c(1,2,27)], 5, nstart = 50)
+
+clu_labels = table(as.vector(kmeans_model$cluster))
+
+# Visualize
+fviz_cluster(kmeans_model, data = d_h_data[,-c(1,2,27)],
+             ellipse.type = "convex",
+             palette = "jco",
+             ggtheme = theme_minimal())
+
+# get the county name in each cluster
+labels = as.vector(kmeans_model$cluster)
+class1 = covid[which(labels == 1),5]
+class2 = covid[which(labels == 2),5]
+class3 = covid[which(labels == 3),5]
+class4 = covid[which(labels == 4),5]
+class5 = covid[which(labels == 5),5]
+
+# compare cluster mean
+cluster_data = d_h_data[,-c(1,2,27)]
+cluster_kmeans = as.matrix(colMeans(cluster_data[which(labels == 1),]))
+cluster_kmeans = cbind(cluster_kmeans,as.matrix(colMeans(cluster_data[which(labels == 2),])))
+cluster_kmeans = cbind(cluster_kmeans,as.matrix(colMeans(cluster_data[which(labels == 3),])))
+cluster_kmeans = cbind(cluster_kmeans,as.matrix(colMeans(cluster_data[which(labels == 4),])))
+cluster_kmeans = cbind(cluster_kmeans,as.matrix(colMeans(cluster_data[which(labels == 5),])))
+colnames(cluster_kmeans) = c("Cluster1","Cluster2","Cluster3","Cluster4","Cluster5")
+#cluster_kmeans
+```
+
+The cluster result is shown above. The same color represents underlying clusters of counties with similar demographics and health-related information. Also, We look at the underlying features of each cluster then get the following result:
+
+Cluster 1 has low PopulationEstimate2018, low PopulationEstimate65.2017, low PopulationDensityperSqMile2010, highest DiabetesPercentage, highest HeartDiseaseMortality, highest StrokeMortality,highest Smokers_Percentage, highest RespMortalityRate2014.
+
+Cluster 2 has high PopulationEstimate2018, high PopulationEstimate65.2017, highest PopulationDensityperSqMile2010, high X.EligibleforMedicare2018.
+
+Cluster 3 has low PopulationEstimate2018, low PopulationEstimate65.2017, low PopulationDensityperSqMile2010, low X.EligibleforMedicare2018, high Smokers_Percentage, lowest X.Hospitals, lowest X.ICU_beds.
+
+Cluster 4 has highest PopulationEstimate2018, highest PopulationEstimate65.2017, highest X.EligibleforMedicare2018, highest X.Hospitals, highest X.ICU_beds.
+
+Cluster 5 has average values.
+
+
+## Q2: Underlying pattern (at the county level) in terms of how the COVID-19 counts are growing (Method: Hierarchical)
+
+The clustering part of how COVID-19 is growing is based on the number of cases and deaths from January 22,2020 to April 22,2020. Same clusters contain counties that have similar growth pattern. In other words, counties with small distance in the number of growth will be formed into one group. In the following analysis, we analyze case and death pattern separately. We implement hierarchical clustering method for this part. Especially, for the measurement of distance, we choose the "dtw" method representing "Dynamic Time Warping", which is an algorithm calculates the least cumulative distance alignment between points of two time-series data.
+
+In order to select the best number of clusters (K) for both case and death problem, we generate the plot about the relationship between K and total within group sum of square. The best K should not be large, but results in small within group distance. According to the figures we generated, we choose 4 as the number of clusters of both case and death clustering. The dendrogram for death result shows how cluster tree grows and the same color in the color bar below the dendrogram represents the same state.
+
+```{r}
+set.seed(123)
+library(BBmisc, quietly = TRUE)
+library(dtwclust, quietly = TRUE)
+library(dtw, quietly = TRUE)
+case_data = covid[cases]
+death_data = covid[deaths]
+case_data_norm = normalize(case_data, method = "standardize")
+death_data_norm = normalize(death_data, method = "standardize")
+```
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 6, fig.width = 9, out.width = '50%'}
+# for cases
+# fviz_nbclust(case_data_norm, hcut, method = "wss", verbose = FALSE) # n = 4
+case_h_mod2 = tsclust(case_data_norm, type = "hierarchical", k = 4L, distance = "dtw_basic")
+
+# plot(case_h_mod2, type="sc")
+
+first_class1 =  which(as.vector(cutree(case_h_mod2, k=4L))==1)
+second_class1 =  which(as.vector(cutree(case_h_mod2, k=4L))==2)
+third_class1 = which(as.vector(cutree(case_h_mod2, k=4L))==3)
+forth_class1 = which(as.vector(cutree(case_h_mod2, k=4L))==4)  #21
+
+# plot dendrogram
+library(gplots)
+suppressPackageStartupMessages(library(dendextend))
+statename = factor(covid[,'StateName'])
+n_states = length(unique(statename))
+cols = colorspace::rainbow_hcl(n_states, c = 70, l  = 50)
+col_states = cols[statename]
+dend1 = as.dendrogram(case_h_mod2)
+par(mar = c(12,4,1,1))
+plot(dend1, ylab = " ", leaflab = "none", main = "Dendrogram for cases")
+colored_bars(col_states,dend1,rowLabels="")
+```
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 6, fig.width = 9, out.width = '50%'}
+# for deaths
+# fviz_nbclust(death_data, hcut, method = "wss", verbose = FALSE) # n = 4
+death_h_mod2 = tsclust(death_data_norm, type = "hierarchical", k = 4L, distance = "dtw_basic")
+
+# plot(death_h_mod2, type="sc")
+
+first_class2 =  which(as.vector(cutree(death_h_mod2, k=4L))==1)
+second_class2 =  which(as.vector(cutree(death_h_mod2, k=4L))==2)
+third_class2 = which(as.vector(cutree(death_h_mod2, k=4L))==3)
+forth_class2 = which(as.vector(cutree(death_h_mod2, k=4L))==4) 
+
+# plot dendrogram
+library(gplots)
+suppressPackageStartupMessages(library(dendextend))
+statename = factor(covid[,'StateName'])
+n_states = length(unique(statename))
+cols = colorspace::rainbow_hcl(n_states, c = 70, l  = 50)
+col_states = cols[statename]
+dend2 = as.dendrogram(death_h_mod2)
+par(mar = c(12,4,1,1))
+plot(dend2, ylab = " ", leaflab = "none", main = "Dendrogram for deaths")
+colored_bars(col_states,dend2,rowLabels="")
+```
+
+The dendrogram for cases (top) and deaths (bottom) results shows how cluster tree grows and the same color in the color bar below the dendrogram represents the same state. The height of each split represents how separated the two county clusters are. The figure shows that the first two clusters have much more cases and deaths than counties in other clusters.
+
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 6, fig.width = 9, out.width = '60%'}
+par(mfrow=c(1,2))
+# plot cluster result for case
+plot(as.matrix(case_data)[(first_class1[1]),],type = "l", col = "red", ylim = c(0,45000), xlab = "Day", ylab = "Number of cases", main = "Cases Growth pattern for each cluster")
+for (i in 2:length(first_class1)) {lines(as.matrix(case_data)[(first_class1[i]),], col = "red")}
+for (i in 1:length(second_class1)) {lines(as.matrix(case_data)[(second_class1[i]),], col = "blue")}
+for (i in 1:length(third_class1)) {lines(as.matrix(case_data)[(third_class1[i]),], col = "green")}
+for (i in 1:length(forth_class1)) {lines(as.matrix(case_data)[(forth_class1[i]),], col = "orange")}
+legend("topleft", c("Class1","Class2","Class3","Class4"), 
+       text.col=c("red", "blue","green","orange"))
+
+# plot cluster result for death
+plot(as.matrix(death_data)[(first_class2[1]),],type = "l", col = "red", ylim = c(0,3500), xlab = "Day", ylab = "Number of death", main = "Death Growth pattern for each cluster")
+for (i in 2:length(first_class2)) {lines(as.matrix(death_data)[(first_class2[i]),], col = "red")}
+for (i in 1:length(second_class2)) {lines(as.matrix(death_data)[(second_class2[i]),], col = "blue")}
+for (i in 1:length(third_class2)) {lines(as.matrix(death_data)[(third_class2[i]),], col = "green")}
+for (i in 1:length(forth_class2)) {lines(as.matrix(death_data)[(forth_class2[i]),], col = "orange")}
+legend("topleft", c("Class1","Class2","Class3","Class4"), 
+       text.col=c("red", "blue","green","orange"))
+```
+
+The plot shows the growth curve for both cases and deaths of all 3141 county and the same color represent the same cluster. 
+
+The figure on the left shows the pattern of cases for each cluster and we could see that different clusters have different maximums and break time. Combined with the cluster size table, we could see most counties are grouped into class2, which represents most cities have similar growth pattern without significant characteristics. The class1 contains counties such as New York, Kings, Queens, Nassau, etc., which all locate in NY, are the regions most affected by the epidemic. Class3 contains counties such as Cook(IL), Los Angeles(CA), San Diego(CA), etc., which are big cites in each state. King(WA) is the only county in class4, which is the origin of the outbreak. 
+
+The second figure on the right shows the pattern of deaths for each cluster and we could see that different clusters have different maximums and break time. Combined with the cluster size table, we could see most counties are grouped into class3, which represents most cities have similar growth pattern without significant characteristics. Class1 contains counties including Kings(NY) and Queens(NY), with the most deaths and the most significant increasing rate. Class2 contains counties Bronx(NY), with less deaths than the first cluster, but with similar growth pattern. King(WA) and Santa Clara(CA) are the counties in class4, which are the first two of death.
+
+
+## Q3: Underlying pattern (at the state level) in terms of the combination of demographic and health as well as how COVID-19 death count grows. (Method: t-SNE + Spectral)
+
+t-SNE^[https://jmonlong.github.io/Hippocamplus/2018/02/13/tsne-and-clustering/] can give really nice results when we want to visualize many groups of multi-dimensional points. Once the 2D graph is done we might want to identify which points cluster in the t-SNE blobs. The COVID-19 data set is high dimensional so t-SNE could significantly help to reduce dimension into two features. Then, we perform spectral clustering method to find the similar states based on the dimension reduction result.
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 6, fig.width = 8, out.width = '60%'}
+# use group mean to see which states have similar d+h.
+check_missing = apply(d_h_data, 2, count_na)
+library(kohonen, quietly = TRUE)
+spec_data_dh = d_h_data[,-c(1,27)]
+
+group_mean_data = aggregate(spec_data_dh[,-1], list(spec_data_dh$StateName), mean)
+
+# t-SNE
+library(Rtsne, quietly = TRUE)
+library(kernlab, quietly = TRUE)
+
+set.seed(42) 
+tsne_out1 = Rtsne(group_mean_data[,-1], dims = 2, perplexity = 10)
+
+
+# Show the objects in the 2D tsne representation
+
+# use spectral clustering based on t-SNE result.
+
+set.seed(42)
+spec_mod1 = specc(tsne_out1$Y, centers = 6,kernel = "rbfdot", kpar = "automatic")
+
+spec_labels1 = as.vector(spec_mod1)
+
+# as.vector(group_mean_data[which(spec_labels == 1),1])
+# as.vector(group_mean_data[which(spec_labels == 2),1])
+# as.vector(group_mean_data[which(spec_labels == 3),1])
+# as.vector(group_mean_data[which(spec_labels == 4),1])
+# as.vector(group_mean_data[which(spec_labels == 5),1])
+# as.vector(group_mean_data[which(spec_labels == 6),1])
+
+# get cluster mean
+
+spec_result_1 = as.matrix(colMeans(group_mean_data[,-1][which(spec_labels1 == 1),]))
+spec_result_1 = cbind(spec_result_1,as.matrix(colMeans(group_mean_data[,-1][which(spec_labels1 == 2),])))
+spec_result_1 = cbind(spec_result_1,as.matrix(colMeans(group_mean_data[,-1][which(spec_labels1 == 3),])))
+spec_result_1 = cbind(spec_result_1,as.matrix(colMeans(group_mean_data[,-1][which(spec_labels1 == 4),])))
+spec_result_1 = cbind(spec_result_1,as.matrix(colMeans(group_mean_data[,-1][which(spec_labels1 == 5),])))
+spec_result_1 = cbind(spec_result_1,as.matrix(colMeans(group_mean_data[,-1][which(spec_labels1 == 6),])))
+
+colnames(spec_result_1) = c("Cluster1","Cluster2","Cluster3","Cluster4","Cluster5","Cluster6")
+#spec_result_1
+```
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 4, fig.width = 6, out.width = '60%'}
+# use group mean to see which states have similar death pattern.
+check_missing = apply(death_data, 2, count_na)
+library(kohonen, quietly = TRUE)
+spec_data_death = cbind(covid$StateName,death_data)
+
+group_mean_death = aggregate(spec_data_death[,-1], list(spec_data_death$`covid$StateName`), mean)
+
+# t-SNE
+library(Rtsne, quietly = TRUE)
+set.seed(42) 
+tsne_out2 = Rtsne(group_mean_death[,-1], dims = 2, perplexity = 10)
+
+# use spectral clustering based on t-SNE result.
+
+set.seed(42)
+spec_mod2 = specc(tsne_out2$Y, centers = 6,kernel = "rbfdot", kpar = "automatic")
+
+spec_labels2 = as.vector(spec_mod2)
+
+# as.vector(group_mean_data[which(spec_labels == 1),1])
+# as.vector(group_mean_data[which(spec_labels == 2),1])
+# as.vector(group_mean_data[which(spec_labels == 3),1])
+# as.vector(group_mean_data[which(spec_labels == 4),1])
+# as.vector(group_mean_data[which(spec_labels == 5),1])
+# as.vector(group_mean_data[which(spec_labels == 6),1])
+
+class1 = as.matrix(group_mean_death[,-1][which(spec_labels2 == 1),])
+class2 = as.matrix(group_mean_death[,-1][which(spec_labels2 == 2),])
+class3 = as.matrix(group_mean_death[,-1][which(spec_labels2 == 3),])
+class4 = as.matrix(group_mean_death[,-1][which(spec_labels2 == 4),])
+class5 = as.matrix(group_mean_death[,-1][which(spec_labels2 == 5),])
+class6 = as.matrix(group_mean_death[,-1][which(spec_labels2 == 6),])
+```
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 5, fig.width = 8, out.width = '60%'}
+par(mfrow=c(1,2))
+plot(tsne_out1$Y, xlab = "Dim-1", ylab = "Dim-2", main = "Demographic and Health Cluster", col = spec_mod1)
+plot(tsne_out2$Y, xlab = "Dim-1", ylab = "Dim-2", main = "Death Count Cluster", col = spec_mod2)
+```
+
+The two figures plot the dimension-reduced coordinates of the fiftyone states and the same color represents states in the same cluster. The figure on the left is the result of demograhphc and health clustering and the right one is the result of death count clustering. 
+ 
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 4, fig.width = 6, out.width = '60%'}
+par(mfrow=c(1,1))
+plot(as.vector(class1[1,]),type = "l", col = "red", ylim = c(0,250), xlab = "Day", ylab = "Number of death", main = "Death Growth pattern for each cluster")
+for (i in 2:nrow(class1)) {lines(as.vector(class1[i,]),type = "l", col = "red")}
+for (i in 1:nrow(class2)) {lines(as.vector(class2[i,]),type = "l", col = "blue")}
+for (i in 1:nrow(class3)) {lines(as.vector(class3[i,]),type = "l", col = "green")}
+for (i in 1:nrow(class4)) {lines(as.vector(class4[i,]),type = "l", col = "purple")}
+for (i in 1:nrow(class5)) {lines(as.vector(class5[i,]),type = "l", col = "orange")}
+for (i in 1:nrow(class6)) {lines(as.vector(class6[i,]),type = "l", col = "pink")}
+
+legend("topleft", c("Class1","Class2","Class3","Class4","Class5","Class6"), 
+       text.col=c("red", "blue","green","purple","orange","pink"))
+```
+
+The figure above shows the growth curve of all the states in different clusters.
+
+# Supervised learning
+
+## Classification Models
+
+The purpose of this section is to perform a binary classification of "if_severe" variable we are creating (value 1 represents death per 100,000 population is greater than 1 and otherwise 0) using the demographics and health-related information. All of our models are trained using `caret` package^[https://topepo.github.io/caret/model-training-and-tuning.html].
+
+```{r warning=FALSE,message=FALSE,include=FALSE}
+library(caret, quietly = TRUE)
+library(tidyverse, quietly = TRUE)
+library(ada, quietly = TRUE)
+library(missForest, quietly = TRUE)
+
+selected_cols = c("PopulationEstimate2018","FracMale2017","PopulationEstimate65.2017","PopulationDensityperSqMile2010","CensusPopulation2010","MedianAge2010","X.EligibleforMedicare2018","MedicareEnrollment.AgedTot2017","DiabetesPercentage","HeartDiseaseMortality","StrokeMortality","Smokers_Percentage","RespMortalityRate2014","X.FTEHospitalTotal2017","TotalM.D..s.TotNon.FedandFed2017","X.HospParticipatinginNetwork2017","X.Hospitals","X.ICU_beds","stay.at.home","X.50.gatherings","X.500.gatherings","public.schools","restaurant.dine.in","entertainment.gym","SVIPercentile","if_severe")
+
+classification_data = covid[selected_cols]
+
+# dim(classification_data) 3141x26
+
+miss_check = apply(classification_data, 2, count_na)
+col_with_missing = miss_check[miss_check != 0]
+
+# replace missing values with predictions of random forest model
+set.seed(42)
+library(randomForest, quietly = TRUE)
+imputed_data = rfImpute(if_severe ~ ., data = classification_data, ntree = 100)
+# dim(imputed_data)
+
+# apply(imputed_data, 2, count_na)
+
+set.seed(42)
+idx = sample(nrow(imputed_data), size = 0.8*nrow(imputed_data))
+trn_data = imputed_data[idx, ]
+tst_data = imputed_data[-idx, ]
+```
+
+Before doing classification, we need to deal with missing data. We use non-parametric imputation method for the rest of the missing data by implementing "rfImpute" method. This method fills in missing values, then runs Random Forest. Then for missing continuous values, Random Forest computes the proximity-weighted average of the missing values. Then this process is repeated several times. 
+
+```{r fig.align = "center"}
+set.seed(42)
+library(caret, quietly = TRUE)
+rf_mod = train(if_severe ~ ., data = trn_data, 
+                 method = "rf",
+                 preProcess = c("center", "scale"),
+                 trControl = trainControl(method = "oob"),
+                 tuneLength = 10)
+
+best_para_rf = rf_mod$bestTune
+
+
+pred_rf = predict(rf_mod,tst_data)
+acc_rf = mean(pred_rf == tst_data$if_severe)
+```
+
+
+```{r fig.align = "center"}
+set.seed(42)
+tree_mod = train(if_severe ~ ., data = trn_data, 
+                 method = "rpart",
+                 preProcess = c("center", "scale"),
+                 trControl = trainControl(method = "cv", number = 5),
+                 tuneLength = 10)
+best_para_tree = tree_mod$bestTune
+
+pred_tree = predict(tree_mod,tst_data)
+acc_tree = mean(pred_tree == tst_data$if_severe)
+```
+
+
+```{r fig.align = "center"}
+set.seed(42)
+knn_mod = train(if_severe ~ ., data = trn_data, 
+                 method = "knn",
+                 preProcess = c("center", "scale"),
+                 trControl = trainControl(method = "cv", number = 5),
+                 tuneLength = 20)
+
+best_para_knn = knn_mod$bestTune
+
+pred_knn = predict(knn_mod,tst_data)
+acc_knn = mean(pred_knn == tst_data$if_severe)
+```
+
+
+```{r fig.align = "center"}
+set.seed(42)
+boost_mod = train(if_severe ~ ., data = trn_data, 
+                 method = "ada",
+                 preProcess = c("center", "scale"),
+                 trControl = trainControl(method = "cv", number = 5),
+                 tuneLength = 5)
+best_para_boost = boost_mod$bestTune #iter = 150, maxdepth = 5 and nu = 0.1
+
+pred_boost = predict(boost_mod,tst_data)
+acc_boost = mean(pred_boost == tst_data$if_severe)
+```
+
+
+```{r fig.height = 5, fig.width = 7, out.width = '80%', fig.align = "center"}
+par(mfrow=c(2,2))
+plot(x = rf_mod$results$mtry, y = rf_mod$results$Accuracy, type = "l",
+     main = "Random Forest: Mtry vs Accuracy", xlab = "mtry", ylab = "Accuracy")
+abline(v = best_para_rf, col = "red", lty=2)
+
+plot(x = tree_mod$results$cp, y = tree_mod$results$Accuracy, type = "l",
+     main = "Tree: Cp vs Accuracy", xlab = "cp", ylab = "Accuracy")
+abline(v = best_para_tree, col = "red", lty=2)
+
+plot(x = knn_mod$results$k, y = knn_mod$results$Accuracy, type = "l",
+     main = "K-nearest neighbors: K vs Accuracy", xlab = "K", ylab = "Accuracy")
+abline(v = best_para_knn, col = "red", lty=2)
+
+plot(boost_mod$results$Accuracy, type = "l",
+     main = "Boosting: Parameter index vs Accuracy",xlab = "parameter index",
+     ylab = "Accuracy")
+abline(v = 25, col = "red", lty=2)
+
+```
+
+For classification problem, we build four models containing Random Forest, Decision Tree, K-nearest neighbors and Boosting. We use function "train" from package "caret" to train and tune parameters in this part. 
+
+Random Forest is an ensemble learning method which make prediction by constructing a multitude of decision trees at training time and outputting the class that has the most vote. For the tuning parameter, we tune mtry (number of variables randomly sampled as candidates at each split). Figure (1,1) shows that the RF model has the highest accuracy when mtry=`r best_para_rf`.
+
+Decision tree breaks down a dataset into smaller and smaller subsets based on decision rules while at the same time an associated decision tree is incrementally developed. 
+Leaves represent class labels and branches represent conjunctions of features that lead to those class labels. For the tuning parameter, we tune cp (complexity parameter that controls the size of the decision tree). Figure (1,2) shows that the Tree model has the highest accuracy when cp=`r round(best_para_tree,3)`.
+
+The k-nearest neighbors algorithm (KNN) is a non-parametric method for classification that an object is classified by a plurality vote of its nearest k neighbors. For the tuning parameter, we tune k (number of neighbors). Figure (2,1) shows that the KNN model has the highest accuracy when k=`r best_para_knn`.
+
+AdaBoost method is an ensemble technique that attempts to create a strong classifier from a number of weak classifiers where more weights are adjusted to incorrectly classified instances.For the tuning parameter, we tune iter(number of iteration), and maxdepth (the depth of the base tree). Figure (2,2) shows that the AdaBoost model has the highest accuracy when iter=`r best_para_boost$iter` and maxdepth=`r best_para_boost$maxdepth`.
+
+```{r}
+# summary for classification
+library(tibble)
+library(tidyverse)
+library(kableExtra)
+tibble(
+  "Model" = c("Random Forest","Tree", "KNN", "Boosting"),
+  "Accuracy" = c(acc_rf, acc_tree,acc_knn,acc_boost),
+) %>% 
+  kable(digits = 6) %>% 
+  kable_styling("striped", full_width = FALSE)
+```
+
+The accuracy table shows that both RF and Boosting model have best classification accuracy among the four models with accuracy `r acc_rf`. 
+
+## Regression Models
+
+The purpose in this section is to perform a regression to predict the number of death one week from April 22,2020. Available predictors not only include demographic and health-related data but also all the death counts and case counts from January 22,2020 to April 22,2020. The predictors we are using include the death counts of previous four days of the target date, 21 demographic and health-related information such as population estimates, median age, number of ICU beds, etc. Specifically, we choose the death counts in April 22,2020 as the response and the previous four days' death counts as predictors. When we try to predict the death count of a future day (say April 25,2020), the demographic and health-related data remain the same, and then we add the death counts from April 21,2020 to April 24,2020 as predictors. Note that some of them are predictions, and we are using previous predictions to make further predictions. However, given the task that we need to predict seven days after April 22,2020, this is the best we can do. It is like the weather forcasting (using the predicted weather to predict future weather), the inaccuracy of further predictions are acceptable. All of our models are trained using `caret` package^[https://topepo.github.io/caret/model-training-and-tuning.html].
+
+```{r}
+# load packages
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(glmnet)
+library(kernlab)
+library(gbm)
+library(tibble)
+library(kableExtra)
+library(missForest)
+```
+
+
+```{r}
+covid = read.csv("county_data.csv")
+
+selected_cols = c("countyFIPS","PopulationEstimate2018","FracMale2017","PopulationEstimate65.2017","PopulationDensityperSqMile2010","CensusPopulation2010","MedianAge2010","X.EligibleforMedicare2018","MedicareEnrollment.AgedTot2017","DiabetesPercentage","HeartDiseaseMortality","StrokeMortality","Smokers_Percentage","RespMortalityRate2014","X.FTEHospitalTotal2017","TotalM.D..s.TotNon.FedandFed2017","X.HospParticipatinginNetwork2017","X.Hospitals","X.ICU_beds","public.schools","restaurant.dine.in","SVIPercentile","X.Deaths_04.18.2020","X.Deaths_04.19.2020","X.Deaths_04.20.2020","X.Deaths_04.21.2020","X.Deaths_04.22.2020")
+
+regression_data = covid[selected_cols]
+
+covid_updated = read.csv("https://raw.githubusercontent.com/Yu-Group/covid19-severity-prediction/master/data/county_level/processed/nytimes_infections/nytimes_infections.csv", header = TRUE)
+```
+
+```{r}
+# missing value
+# This function is used for counting the number of missing data for each feature.
+count_na = function(x){ 
+  sum(is.na(x))
+}
+miss_check = apply(regression_data, 2, count_na)
+col_with_missing = miss_check[miss_check != 0]
+```
+
+```{r include=FALSE}
+# replace missing values with predictions of random forest model
+set.seed(42)
+imputed_data = rfImpute(X.Deaths_04.22.2020 ~ . - countyFIPS, data = regression_data, ntree = 100)
+
+colnames(imputed_data) = c("y","countyFIPS","PopulationEstimate2018","FracMale2017","PopulationEstimate65.2017","PopulationDensityperSqMile2010","CensusPopulation2010","MedianAge2010","X.EligibleforMedicare2018","MedicareEnrollment.AgedTot2017","DiabetesPercentage","HeartDiseaseMortality","StrokeMortality","Smokers_Percentage","RespMortalityRate2014","X.FTEHospitalTotal2017","TotalM.D..s.TotNon.FedandFed2017","X.HospParticipatinginNetwork2017","X.Hospitals","X.ICU_beds","public.schools","restaurant.dine.in","SVIPercentile","day1","day2","day3","day4")
+```
+
+### Penalized Linear Model
+
+Similarly to the classification part, we used random forest imputation method to fill in missing data once again. The first model we are considering is penalized linear model. The following three plots show how the mean squared error changes with the penalized coefficient $\lambda$. The first one is ridge regression, the second one is LASSO regression, and the last one is elastic net regression (with $\alpha=0.5$ which is half ridge and half LASSO). We can clearly see that the optimal $\lambda$ for all three model is zero, which indicates that we do not need any penalty on the coefficients. In other words, the ordinary least square gives us the lowest mean squared error. 
+
+```{r}
+x_trn = as.matrix(imputed_data[,3:27])
+y_trn = imputed_data$y
+
+# ridge regression tuning
+cv_fit1 = cv.glmnet(x = x_trn, y = y_trn, nfolds = 10, family = "gaussian", alpha = 0)
+# plot(cv_fit1)
+```
+
+```{r}
+# lasso regression tuning
+cv_fit2 = cv.glmnet(x = x_trn, y = y_trn, nfolds = 10, family = "gaussian", alpha = 1)
+# plot(cv_fit2)
+```
+
+```{r}
+# elastic net tuning
+cv_fit3 = cv.glmnet(x = x_trn, y = y_trn, nfolds = 10, family = "gaussian", alpha = 0.5)
+# plot(cv_fit3)
+```
+
+```{r fig.align = "center", warning=FALSE,message=FALSE,fig.height = 4, fig.width = 8, out.width = '70%'}
+par(mfrow=c(1,3))
+plot(cv_fit1)
+plot(cv_fit2)
+plot(cv_fit3)
+```
+
+
+#### Ordinary Least Square
+
+The we can perform ordinary least square regression. Since we already figure out the optimal $\lambda$ in the previous section, we do not need to tune any parameters here. We performed data preprocessing by standarizing all variables before training, and the model was trained using 5-fold cross validation. The result is as follows. The training RMSE is about 1.99. 
+
+```{r}
+# ols
+set.seed(42)
+lm_mod = train(y ~ . - countyFIPS, data = imputed_data, 
+               method = "lm",
+               preProcess = c("center", "scale"),
+               trControl = trainControl(method = "cv", number = 5))
+lm_mod
+```
+
+```{r}
+# lm_mod$finalModel$coefficients
+```
+
+```{r}
+# predict 0423 death count
+pre_selected = imputed_data[2:23]
+
+temp = covid[c("X.Deaths_04.19.2020","X.Deaths_04.20.2020","X.Deaths_04.21.2020","X.Deaths_04.22.2020")]
+colnames(temp) = c("day1","day2","day3","day4")
+
+tst_0423 = cbind(pre_selected, temp)
+  
+pred_0423 = predict(lm_mod, tst_0423)
+```
+
+```{r}
+# predict 0424-0429 death count
+next_day_preds = function(cur_preds){
+  temp$day1 = temp$day2
+  temp$day2 = temp$day3
+  temp$day3 = temp$day4
+  temp$day4 = cur_preds
+  x_tst = cbind(pre_selected, temp)
+  predict(lm_mod, x_tst)
+}
+
+pred_0424 = next_day_preds(pred_0423)
+pred_0425 = next_day_preds(pred_0424)
+pred_0426 = next_day_preds(pred_0425)
+pred_0427 = next_day_preds(pred_0426)
+pred_0428 = next_day_preds(pred_0427)
+pred_0429 = next_day_preds(pred_0428)
+```
+
+
+```{r}
+# combine the countyFIPS and predictions into a dataframe for further use
+pred_vals = as.data.frame(cbind(covid$countyFIPS, pred_0423, pred_0424, pred_0425, pred_0426, pred_0427, pred_0428, pred_0429))
+colnames(pred_vals) = c("countyFIPS", paste0("death_pred_", 423:429))
+```
+
+
+```{r}
+# validate using updated data
+
+## first, perform data cleaning to updated data
+covid_updated = covid_updated[1:2888,]
+covid_updated$countyFIPS = as.numeric(as.character(covid_updated$countyFIPS))
+
+## second, extract countyFIPS and real death counts and perform left join
+real_data = covid_updated[c("countyFIPS","X.Deaths_04.23.2020","X.Deaths_04.24.2020","X.Deaths_04.25.2020","X.Deaths_04.26.2020","X.Deaths_04.27.2020","X.Deaths_04.28.2020","X.Deaths_04.29.2020")]
+
+real_data$X.Deaths_04.23.2020 = as.numeric(real_data$X.Deaths_04.23.2020)
+real_data$X.Deaths_04.24.2020 = as.numeric(real_data$X.Deaths_04.24.2020)
+real_data$X.Deaths_04.25.2020 = as.numeric(real_data$X.Deaths_04.25.2020)
+real_data$X.Deaths_04.26.2020 = as.numeric(real_data$X.Deaths_04.26.2020)
+real_data$X.Deaths_04.27.2020 = as.numeric(real_data$X.Deaths_04.27.2020)
+real_data$X.Deaths_04.28.2020 = as.numeric(real_data$X.Deaths_04.28.2020)
+real_data$X.Deaths_04.29.2020 = as.numeric(real_data$X.Deaths_04.29.2020)
+
+combined_results = left_join(x = real_data, y = pred_vals, by = c("countyFIPS" = "countyFIPS"))
+
+rmse = function(act, pred){
+  sqrt(mean((act-pred)^2, na.rm = TRUE))  
+}
+
+lm_0423_rmse = rmse(combined_results$X.Deaths_04.23.2020, combined_results$death_pred_423)
+lm_0424_rmse = rmse(combined_results$X.Deaths_04.24.2020, combined_results$death_pred_424)
+lm_0425_rmse = rmse(combined_results$X.Deaths_04.25.2020, combined_results$death_pred_425)
+lm_0426_rmse = rmse(combined_results$X.Deaths_04.26.2020, combined_results$death_pred_426)
+lm_0427_rmse = rmse(combined_results$X.Deaths_04.27.2020, combined_results$death_pred_427)
+lm_0428_rmse = rmse(combined_results$X.Deaths_04.28.2020, combined_results$death_pred_428)
+lm_0429_rmse = rmse(combined_results$X.Deaths_04.29.2020, combined_results$death_pred_429)
+```
+
+
+### Random forest
+
+```{r fig.height = 4, fig.width = 6, out.width = '60%', fig.align = "center"}
+x_trn = as.matrix(imputed_data[,3:27])
+y_trn = imputed_data$y
+
+# random forest tuning
+set.seed(42)
+control = trainControl(method = "oob", number = 5)
+rf_mod = train(x = x_trn, y = y_trn, method = "rf", metric = "RMSE",
+                  tuneLength = 10, trControl=control)
+best_mtry = as.numeric(rf_mod$bestTune)
+print(rf_mod) # mtry = 17
+plot(rf_mod)
+```
+
+The second model is random forest. Here we used root mean squared error as our metric, and the best "mtry" parameter was chosen among 10 different values by default grid. The "mtry" parameter correspondes to how many variables are we considering in each split in each tree model. This model is trained using out-of-bag validation, the best tuning paramter is `r best_mtry`. The plot above shows how RMSE changes for different "mtry" values.
+
+```{r}
+# predict 0423 death count
+pre_selected = imputed_data[2:23]
+
+temp = covid[c("X.Deaths_04.19.2020","X.Deaths_04.20.2020","X.Deaths_04.21.2020","X.Deaths_04.22.2020")]
+colnames(temp) = c("day1","day2","day3","day4")
+
+tst_0423 = cbind(pre_selected, temp)
+  
+pred_0423_rf = predict(rf_mod, tst_0423)
+
+# predict 0424-0429 death count
+next_day_preds = function(cur_preds){
+  temp$day1 = temp$day2
+  temp$day2 = temp$day3
+  temp$day3 = temp$day4
+  temp$day4 = cur_preds
+  x_tst = cbind(pre_selected, temp)
+  predict(rf_mod, x_tst)
+}
+
+pred_0424_rf = next_day_preds(pred_0423_rf)
+pred_0425_rf = next_day_preds(pred_0424_rf)
+pred_0426_rf = next_day_preds(pred_0425_rf)
+pred_0427_rf = next_day_preds(pred_0426_rf)
+pred_0428_rf = next_day_preds(pred_0427_rf)
+pred_0429_rf = next_day_preds(pred_0428_rf)
+```
+
+```{r}
+# combine the countyFIPS and predictions into a dataframe for further use
+pred_vals_rf = as.data.frame(cbind(covid$countyFIPS, pred_0423_rf, pred_0424_rf, pred_0425_rf, pred_0426_rf, pred_0427_rf, pred_0428_rf, pred_0429_rf))
+colnames(pred_vals_rf) = c("countyFIPS", paste0("death_pred_", 423:429))
+
+combined_results_rf = left_join(x = real_data, y = pred_vals_rf, by = c("countyFIPS" = "countyFIPS"))
+
+rf_0423_rmse = rmse(combined_results_rf$X.Deaths_04.23.2020, combined_results_rf$death_pred_423)
+rf_0424_rmse = rmse(combined_results_rf$X.Deaths_04.24.2020, combined_results_rf$death_pred_424)
+rf_0425_rmse = rmse(combined_results_rf$X.Deaths_04.25.2020, combined_results_rf$death_pred_425)
+rf_0426_rmse = rmse(combined_results_rf$X.Deaths_04.26.2020, combined_results_rf$death_pred_426)
+rf_0427_rmse = rmse(combined_results_rf$X.Deaths_04.27.2020, combined_results_rf$death_pred_427)
+rf_0428_rmse = rmse(combined_results_rf$X.Deaths_04.28.2020, combined_results_rf$death_pred_428)
+rf_0429_rmse = rmse(combined_results_rf$X.Deaths_04.29.2020, combined_results_rf$death_pred_429)
+```
+
+### Support Vector Machines with Linear kernel
+
+```{r fig.height = 4, fig.width = 6, out.width = '60%', fig.align = "center"}
+x_trn = as.matrix(imputed_data[,3:27])
+y_trn = imputed_data$y
+
+control = trainControl(method = "cv", number = 5)
+C_grid = expand.grid(C = seq(1,10))
+
+set.seed(42)
+svm_mod = train(x = x_trn, y = y_trn,
+                 method = "svmLinear",
+                 trControl = control,
+                 tuneGrid = C_grid,
+                 preProcess = c("scale"))
+
+best_C = as.numeric(svm_mod$bestTune)
+print(svm_mod) # C = 2
+plot(svm_mod)
+```
+
+The third model is support vector machines with linear kernel. In this model, the tuning parameter $C$ is penalize coefficient for the sum of $\xi$, which is the distance between the support vector and its corresponsing margin (we have covered that in lecture). We scale all the variables before training since SVM is sensitive to distancing. The best parameter $C$ is chosen among 10 different values from 1 to 10, and the model is validated using 5-fold cross validation. As a result, the best tuning paramter is `r best_C`. 
+
+```{r}
+# predict 0423 death count
+pre_selected = imputed_data[2:23]
+
+temp = covid[c("X.Deaths_04.19.2020","X.Deaths_04.20.2020","X.Deaths_04.21.2020","X.Deaths_04.22.2020")]
+colnames(temp) = c("day1","day2","day3","day4")
+
+tst_0423 = cbind(pre_selected[,-1], temp)
+  
+pred_0423_svm = predict(svm_mod, tst_0423)
+
+# predict 0424-0429 death count
+next_day_preds = function(cur_preds){
+  temp$day1 = temp$day2
+  temp$day2 = temp$day3
+  temp$day3 = temp$day4
+  temp$day4 = cur_preds
+  x_tst = cbind(pre_selected[,-1], temp)
+  predict(svm_mod, x_tst)
+}
+
+pred_0424_svm = next_day_preds(pred_0423_svm)
+pred_0425_svm = next_day_preds(pred_0424_svm)
+pred_0426_svm = next_day_preds(pred_0425_svm)
+pred_0427_svm = next_day_preds(pred_0426_svm)
+pred_0428_svm = next_day_preds(pred_0427_svm)
+pred_0429_svm = next_day_preds(pred_0428_svm)
+```
+
+```{r}
+# combine the countyFIPS and predictions into a dataframe for further use
+pred_vals_svm = as.data.frame(cbind(covid$countyFIPS, pred_0423_svm, pred_0424_svm, pred_0425_svm, pred_0426_svm, pred_0427_svm, pred_0428_svm, pred_0429_svm))
+colnames(pred_vals_svm) = c("countyFIPS", paste0("death_pred_", 423:429))
+
+combined_results_svm = left_join(x = real_data, y = pred_vals_svm, by = c("countyFIPS" = "countyFIPS"))
+
+svm_0423_rmse = rmse(combined_results_svm$X.Deaths_04.23.2020, combined_results_svm$death_pred_423)
+svm_0424_rmse = rmse(combined_results_svm$X.Deaths_04.24.2020, combined_results_svm$death_pred_424)
+svm_0425_rmse = rmse(combined_results_svm$X.Deaths_04.25.2020, combined_results_svm$death_pred_425)
+svm_0426_rmse = rmse(combined_results_svm$X.Deaths_04.26.2020, combined_results_svm$death_pred_426)
+svm_0427_rmse = rmse(combined_results_svm$X.Deaths_04.27.2020, combined_results_svm$death_pred_427)
+svm_0428_rmse = rmse(combined_results_svm$X.Deaths_04.28.2020, combined_results_svm$death_pred_428)
+svm_0429_rmse = rmse(combined_results_svm$X.Deaths_04.29.2020, combined_results_svm$death_pred_429)
+```
+
+### Stochastic Gradient Boosting
+
+```{r fig.height = 4, fig.width = 6, out.width = '60%', fig.align = "center"}
+x_trn = as.matrix(imputed_data[,3:27])
+y_trn = imputed_data$y
+
+gbm_control = trainControl(method = "cv", number = 5)
+Grid = expand.grid(interaction.depth = c(2,4,6,8,10), n.trees = c(100,300,500,700),
+                   shrinkage = 0.01,
+                   n.minobsinnode = 10)
+
+set.seed(42)
+gbm_mod = train(x = x_trn, y = y_trn,
+                distribution = "gaussian",
+                 method = "gbm",
+                 trControl = gbm_control,
+                 tuneGrid = Grid,
+                 verbose = FALSE,
+                 metric = "RMSE")
+
+print(gbm_mod)
+
+plot(gbm_mod)
+```
+
+The fourth model is stochastic gradient boosting. Here we consider four values (100,300,500,700) of n.trees, which represents the number of gradient boosting iteration. Increasing n.tree reduces the error on the training set, but setting it too high may lead to over-fitting. The interaction.depth parameter is the maximum number of nodes for each tree starting from a single node, and we consider five values (2,4,6,8,10). The shrinkage parameter is just the learning rate, and we set it constant here at a level of 0.01. Since this is a decently large dataset, we keep it at a relatively small number. The n.minobsinnode parameter is the minimum number of observations in trees' terminal nodes. (If you are familiar with Python packages, this is usually what they called max_leaf.) Here we set it at a constant level of 10.^[https://www.listendata.com/2015/07/gbm-boosted-models-tuning-parameters.html] As before, we validate this model using 5-fold cross validation to select the best combination of tuning parameters. The best combination of tuning parameters are interaction.depth = `r gbm_mod$bestTune$interaction.depth` and n.trees = `r gbm_mod$bestTune$n.trees`, while holding shinkage=0.01 and n.minobsinnode = 10. The above plots show how the RMSE changes while using different combinations of interaction.depth and n.trees.
+
+```{r}
+# predict 0423 death count
+pre_selected = imputed_data[2:23]
+
+temp = covid[c("X.Deaths_04.19.2020","X.Deaths_04.20.2020","X.Deaths_04.21.2020","X.Deaths_04.22.2020")]
+colnames(temp) = c("day1","day2","day3","day4")
+
+tst_0423 = cbind(pre_selected[,-1], temp)
+  
+pred_0423_gbm = predict(gbm_mod, tst_0423)
+
+# predict 0424-0429 death count
+next_day_preds = function(cur_preds){
+  temp$day1 = temp$day2
+  temp$day2 = temp$day3
+  temp$day3 = temp$day4
+  temp$day4 = cur_preds
+  x_tst = cbind(pre_selected[,-1], temp)
+  predict(gbm_mod, x_tst)
+}
+
+pred_0424_gbm = next_day_preds(pred_0423_gbm)
+pred_0425_gbm = next_day_preds(pred_0424_gbm)
+pred_0426_gbm = next_day_preds(pred_0425_gbm)
+pred_0427_gbm = next_day_preds(pred_0426_gbm)
+pred_0428_gbm = next_day_preds(pred_0427_gbm)
+pred_0429_gbm = next_day_preds(pred_0428_gbm)
+
+# combine the countyFIPS and predictions into a dataframe for further use
+pred_vals_gbm = as.data.frame(cbind(covid$countyFIPS, pred_0423_gbm, pred_0424_gbm, pred_0425_gbm, pred_0426_gbm, pred_0427_gbm, pred_0428_gbm, pred_0429_gbm))
+colnames(pred_vals_gbm) = c("countyFIPS", paste0("death_pred_", 423:429))
+
+combined_results_gbm = left_join(x = real_data, y = pred_vals_gbm, by = c("countyFIPS" = "countyFIPS"))
+
+gbm_0423_rmse = rmse(combined_results_svm$X.Deaths_04.23.2020, combined_results_gbm$death_pred_423)
+gbm_0424_rmse = rmse(combined_results_svm$X.Deaths_04.24.2020, combined_results_gbm$death_pred_424)
+gbm_0425_rmse = rmse(combined_results_svm$X.Deaths_04.25.2020, combined_results_gbm$death_pred_425)
+gbm_0426_rmse = rmse(combined_results_svm$X.Deaths_04.26.2020, combined_results_gbm$death_pred_426)
+gbm_0427_rmse = rmse(combined_results_svm$X.Deaths_04.27.2020, combined_results_gbm$death_pred_427)
+gbm_0428_rmse = rmse(combined_results_svm$X.Deaths_04.28.2020, combined_results_gbm$death_pred_428)
+gbm_0429_rmse = rmse(combined_results_svm$X.Deaths_04.29.2020, combined_results_gbm$death_pred_429)
+```
+
+### Test our models using real data (Bonus)
+
+Having all four models, we used them to predict the future seven days from April 23,2020 to April 29,2020, and compared the predictions with the updated data. The resulted accuracy (RMSE) table is as follows.
+
+```{r, warning=FALSE, message=FALSE}
+tibble(
+  "Model" = c("OLS", "RF", "SVM", "SGB"),
+  "best tuning" = c("lambda = 0", 
+                    "mtry = 17", 
+                    "C = 2", 
+                    "depth = 6, ntree = 500"),
+  
+  "04/23" = c(lm_0423_rmse, rf_0423_rmse, svm_0423_rmse, gbm_0423_rmse),
+  "04/24" = c(lm_0424_rmse, rf_0424_rmse, svm_0424_rmse, gbm_0424_rmse),
+  "04/25" = c(lm_0425_rmse, rf_0425_rmse, svm_0425_rmse, gbm_0425_rmse),
+  "04/26" = c(lm_0426_rmse, rf_0426_rmse, svm_0426_rmse, gbm_0426_rmse),
+  "04/27" = c(lm_0427_rmse, rf_0427_rmse, svm_0427_rmse, gbm_0427_rmse),
+  "04/28" = c(lm_0428_rmse, rf_0428_rmse, svm_0428_rmse, gbm_0428_rmse),
+  "04/29" = c(lm_0429_rmse, rf_0429_rmse, svm_0429_rmse, gbm_0429_rmse),
+) %>% 
+  kable(digits = 4) %>% 
+  kable_styling("striped", full_width = FALSE)
+```
+
+We can see that the best model is linear model, second place is SVM with linear kernel, third place is random forest, the worst one is gradient boosting. Also the RMSE gets larger and larger for further predictions, which is as expected. Take Champaign County in IL as an example (since we all stuck in here for now), the real death count and predictions are as follows: 
+
+```{r}
+Champaign_FIPS = covid[covid$CountyName == "Champaign" & covid$StateName == "IL","countyFIPS"]
+real_count = as.matrix(covid_updated[covid_updated$countyFIPS == 17019, 208:214])
+lm_pred = as.matrix(pred_vals[pred_vals$countyFIPS == 17019, 2:8])
+svm_pred = as.matrix(pred_vals_svm[pred_vals$countyFIPS == 17019, 2:8])
+rf_pred = as.matrix(pred_vals_rf[pred_vals$countyFIPS == 17019, 2:8])
+gbm_pred = as.matrix(pred_vals_gbm[pred_vals$countyFIPS == 17019, 2:8])
+
+results = rbind(real_count, lm_pred, svm_pred, rf_pred, gbm_pred)
+colnames(results) = c(paste0("death_", 423:429))
+rownames(results) = c("true_value","lm_pred","svm_pred","rf_pred","gbm_pred")
+results
+```
+
+### Discussion, Improvements and Reflection
+
+Method-wise, up to this point we only considered to predict the death count using the data from previous four days plus some extra features. However, we do not know whether using four days' data is appropriate. It could be more than we need, or it could not be enough. There are several improvements we could consider. The first one is that we can make is that we can treat this as a tuning parameter and try to see how the result changes when we are using different length of period as predictors. The second one is to try some transformations of linear model such as log-linear, or even consider a combination of them just like Prof.Yu's team suggested. The third one is that we could predict the increment of covid-19 from the previous day rather than predicting the count directly since there is some situations in our result that the value of the next day is smaller than the previous day. 
+
+Data-wise, the dataset we are using was updated in April 23,2020. If you go to see the most recent updates, you will find out that some of the death counts in our data set are underestimated. To reflect on this, one of the reasons why linear model performs the best in our prediction is due to the lack of update to our dataset. According to the literature, some of the counties have shown a sub-exponential growth already, and the lack of updates just makes the linear model even better. However, this might not be the case in the reality. Thus, we could have a better shot at predicting the future if we have a more accurate dataset, but this is the best we can do when we are in April 22,2020.
+
+Admittedly, even if we fix all the issues mentioned above, it may still not be enough to capture all the changes, because the world is constantly changing, in both human behaviors and policy changes, for the same reasons as we discussed in the literature review section. Given that, we should still try our best to capture the short-term trends and to help people make better decisions at this critical time in this pandemic.
+
+
+# Collaborator's Questions
+
+## Q1: What population is the most vulnerable to this virus?
+
+```{r}
+# missing value check
+count_na = function(x){ 
+  sum(is.na(x))
+}
+
+#select certain variables
+selected_cols = c("countyFIPS","StateName","PopulationEstimate2018","FracMale2017","PopulationEstimate65.2017","PopulationDensityperSqMile2010","CensusPopulation2010","MedianAge2010","X.EligibleforMedicare2018","MedicareEnrollment.AgedTot2017","DiabetesPercentage","HeartDiseaseMortality","StrokeMortality","Smokers_Percentage","RespMortalityRate2014","X.FTEHospitalTotal2017","TotalM.D..s.TotNon.FedandFed2017","X.HospParticipatinginNetwork2017","X.Hospitals","X.ICU_beds","X.50.gatherings","X.500.gatherings","public.schools","restaurant.dine.in","entertainment.gym","SVIPercentile")
+d_h_data = covid[selected_cols]
+check_missing = apply(d_h_data, 2, count_na)
+
+# fill missing 
+
+# X.EligibleforMedicare2018
+idx = which(is.na(d_h_data[,"X.EligibleforMedicare2018"]))
+rate = mean(d_h_data[-idx,"CensusPopulation2010"]/d_h_data[-idx,"X.EligibleforMedicare2018"])
+for (i in 1:nrow(d_h_data)) {
+  if(is.na(d_h_data[i,9]))
+    d_h_data[i,9] = d_h_data[i,7]/rate
+}
+
+# MedicareEnrollment.AgedTot2017
+idx = which(is.na(d_h_data[,"MedicareEnrollment.AgedTot2017"]))
+rate = mean(d_h_data[-idx,"CensusPopulation2010"]/d_h_data[-idx,"MedicareEnrollment.AgedTot2017"])
+for (i in 1:nrow(d_h_data)) {
+  if(is.na(d_h_data[i,10]))
+    d_h_data[i,10] = d_h_data[i,9]/rate
+}
+
+# DiabetesPercentage (use the mean of all Ak)
+idx = which(is.na(d_h_data["DiabetesPercentage"])) #1955(AK)
+d_h_data[1955,"DiabetesPercentage"] = mean(d_h_data[which(d_h_data["StateName"] == "AK")[-28],"DiabetesPercentage"])
+
+# HeartDiseaseMortality (use mean of all AK)
+idx = which(is.na(d_h_data[,"HeartDiseaseMortality"]))
+idx_ak = which(d_h_data["StateName"] == "AK")
+d_h_data[idx,"HeartDiseaseMortality"] = mean(d_h_data[idx_ak[-match(idx,idx_ak)],"HeartDiseaseMortality"])
+
+# StrokeMortality
+idx = which(is.na(d_h_data[,"StrokeMortality"]))
+idx_ak = which(d_h_data["StateName"] == "AK")
+idx_sd = which(d_h_data["StateName"] == "SD") 
+d_h_data[1664,"StrokeMortality"] = mean(d_h_data[idx_sd[-48],"StrokeMortality"])
+idx = which(is.na(d_h_data[,"StrokeMortality"]))
+d_h_data[idx,"StrokeMortality"] = mean(d_h_data[idx_ak[-match(idx,idx_ak)],"StrokeMortality"])
+
+
+# X.50.gatherings (only SD and ND) 
+idx = which(is.na(d_h_data[,"X.50.gatherings"]))
+d_h_data[idx,c("X.50.gatherings","X.500.gatherings")] = 0
+
+# entertainment.gym
+idx = which(is.na(d_h_data[,"entertainment.gym"]))
+d_h_data[idx,"entertainment.gym"] = 0
+
+# SVIPercentile
+idx = which(is.na(d_h_data[,"SVIPercentile"]))
+d_h_data[idx,"SVIPercentile"] = 0
+
+check_missing = apply(d_h_data, 2, count_na)
+```
+
+We define the most vulnerable population as a population with the highest increase of COVID-19 cases and  mortality rate over the given period of time. 
+
+From a county perspective, we have already done a clustering analysis on both cases and death data. Kings, Queens, Bronx, Nassau, New York, Suffock and Westchester fall into the cases cluster with the highest increase of cases. Kings and Queens fall into a death cluster with the highest increase of deaths. Thus, the most vulnerable population is residing in Kings and Queens counties. To be more general, cities in NY are more likely to be vulnerable population. 
+
+```{r}
+volum = data.frame(colMeans(d_h_data[c(first_class2,second_class2),-c(1,2)]),colMeans(d_h_data[-c(first_class2,second_class2),-c(1,2)]))
+colnames(volum) = c("Most Vulnerable","Less Vulnerable")
+volum[c(1,3,4,5,7,14,18),]
+```
+
+From a feature perspective, the table above compares some features with significant difference between the most vulnerable population and less vulnerable ones. Result shows that vulnerable counties have much more population density, easier access to healthcare providers (including hospitals) and than less vulnerable ones.
+
+
+```{r}
+volu = covid[c(first_class1),5]
+```
+
+## Q2: What can we do to reduce mortality? 
+
+Recall our clustering result of death count, we first look at the underlying features of the COVID-19 data cluster that contains Queens and Kings counties. They both fall into cluster 2. 
+
+This cluster has the highest population density per square mile, second highest population, heart disease mortality, PopulationEstimate65.2017, X.FTEHospitalTotal2017, X.EligibleforMedicare2018, MedicareEnrollment.AgedTot2017, X.Hospitals, X.ICU_beds and average values for other variables. We look at the statistically significant variables from the analysis before and compare them to the underlying features of the cluster. All of the underlying features of this cluster are highly significant in the linear model. Cluster 4 has higher values for most of the variables but has a much lower population density.
+
+Then we run the best regression model from the analysis before on this particular cluster. We look at the statistically significant variables and compare them to the underlying features of the cluster, the top six coefficients (except for intercept and day count) ordered by absolute value are shown below:
+
+```{r}
+coef = as.data.frame(lm_mod$finalModel$coefficients[-1])
+coef["Feature Name"] = lm_mod$coefnames
+colnames(coef) = c("Coefficient","Feature Name")
+
+coef_order = head(coef[order(abs(coef$Coefficient), decreasing = T),][-c(1,2,3,4),],6)
+coefs = coef_order[,1]
+name = coef_order[,2]
+
+suggestion = as.data.frame(matrix(data = c(name,coefs), ncol = 2))
+colnames(suggestion) = c("Feature","Coefficient")
+suggestion
+```
+
+Regression coefficients are estimates of the unknown population parameters and describe the relationship between a predictor variable and the response. In our case, the response is the number of death and predictor variables are demographic and health related features. The positive sigh of coefficient suggests the response increases as the variable increase and vise versa. According to the coefficient table, we could see that to predict number of death, the population is positively related to death count, while the increase of EligibleforMedicare and number of ICU beds will reduce the growing pattern. 
+
+### Suggested Actions 
+
+Lowering the density population is one way to reduce deaths. This is done through “stay at home” order to reduce the spread of COVID-19. A lot of significant variables are connected to hospitals. Higher percentage of testing due to higher amounts of hospitals means higher COVID-19 numbers. We can stop testing done to reduce COVID-19 cases. On the other hand, higher amounts of hospitals and ICD beds means more people getting treated from the virus. Thus, death numbers will go down.
+
